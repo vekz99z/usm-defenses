@@ -10,6 +10,7 @@ const {
     ButtonStyle,
     StringSelectMenuBuilder,
     EmbedBuilder,
+    AuditLogEvent,
     MessageFlags,
     ChannelType
 } = require("discord.js");
@@ -36,7 +37,7 @@ const CLIENT_ID = "1552882368677683280";
 const GLOBAL_BAN_IMMUNE_USER_ID = "1481161020721463327";
 
 if (!TOKEN) {
-    console.error("❌ DISCORD_TOKEN is missing from Replit Secrets.");
+    console.error("❌ DISCORD_TOKEN is missing from your hosting environment variables.");
     process.exit(1);
 }
 
@@ -238,6 +239,105 @@ async function getOrCreateRole(guild, name, color = null) {
         console.error(`❌ Could not create role "${name}" in ${guild.name}:`, error.message);
         return null;
     }
+}
+
+// ============================================================
+// SERVER LOGGING
+// ============================================================
+
+const LOG_CHANNEL_NAME = "bot-logs";
+
+function truncateLog(text, max = 1000) {
+    if (text === null || text === undefined || text === "") return "(none)";
+    text = String(text);
+    return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+async function getOrCreateLogChannel(guild) {
+    try {
+        let channel = guild.channels.cache.find(
+            c => c.type === ChannelType.GuildText && c.name === LOG_CHANNEL_NAME
+        );
+
+        if (channel) return channel;
+
+        const settings = getSettings(guild.id);
+
+        const overwrites = [
+            {
+                id: guild.id,
+                deny: [PermissionFlagsBits.ViewChannel]
+            },
+            {
+                id: client.user.id,
+                allow: [
+                    PermissionFlagsBits.ViewChannel,
+                    PermissionFlagsBits.SendMessages,
+                    PermissionFlagsBits.EmbedLinks,
+                    PermissionFlagsBits.ReadMessageHistory
+                ]
+            }
+        ];
+
+        if (settings.staffRoleId) {
+            overwrites.push({
+                id: settings.staffRoleId,
+                allow: [
+                    PermissionFlagsBits.ViewChannel,
+                    PermissionFlagsBits.ReadMessageHistory
+                ]
+            });
+        }
+
+        channel = await guild.channels.create({
+            name: LOG_CHANNEL_NAME,
+            type: ChannelType.GuildText,
+            permissionOverwrites: overwrites,
+            reason: "USM Defenses automatic server logging channel"
+        });
+
+        console.log(`📋 Created #${LOG_CHANNEL_NAME} in ${guild.name}`);
+        return channel;
+    } catch (error) {
+        console.error(`❌ Could not create/find #${LOG_CHANNEL_NAME} in ${guild.name}:`, error.message);
+        return null;
+    }
+}
+
+async function logEvent(guild, title, description, color = null) {
+    try {
+        const channel = await getOrCreateLogChannel(guild);
+        if (!channel) return;
+
+        const embed = new EmbedBuilder()
+            .setTitle(title)
+            .setDescription(truncateLog(description, 4000))
+            .setTimestamp();
+
+        if (color) embed.setColor(color);
+
+        await channel.send({ embeds: [embed] });
+    } catch (error) {
+        console.error(`❌ Log error in ${guild.name}:`, error.message);
+    }
+}
+
+async function findAuditExecutor(guild, type, targetId) {
+    try {
+        const logs = await guild.fetchAuditLogs({ limit: 10, type });
+        const entry = logs.entries.find(entry => {
+            if (targetId && entry.target?.id !== targetId) return false;
+            return Date.now() - entry.createdTimestamp < 15000;
+        });
+        return entry?.executor || null;
+    } catch {
+        return null;
+    }
+}
+
+async function setupLogging(guild) {
+    ensureGuildData(guild.id);
+    await getOrCreateLogChannel(guild);
 }
 
 // ============================================================
@@ -1358,7 +1458,8 @@ client.on("interactionCreate", async interaction => {
                 content:
                     `📨 **Invite Stats — ${user.tag}**\n\n` +
                     `Joins: **${stats.joins}**\n` +
-                    `Unique members: **${stats.members.length}**\n` +
+                    `Unique members: **${stats.members.length}**
+\n` +
                     `Invite links created: **${stats.linksCreated}**`,
                 flags: MessageFlags.Ephemeral
             });
@@ -2300,28 +2401,20 @@ client.on("messageCreate", async message => {
 
     if (!message.guild || message.author.bot) return;
 
-    const settings =
-        getSettings(message.guild.id);
+    const settings = getSettings(message.guild.id);
 
     if (!settings.spamEnabled) return;
 
-    const key =
-        `${message.guild.id}:${message.author.id}`;
-
+    const key = `${message.guild.id}:${message.author.id}`;
     const now = Date.now();
-
-    const messages =
-        messageTracker.get(key) || [];
+    const messages = messageTracker.get(key) || [];
 
     messages.push(now);
 
-    const recent =
-        messages.filter(time => now - time < 5000);
-
+    const recent = messages.filter(time => now - time < 5000);
     messageTracker.set(key, recent);
 
     if (recent.length >= 8) {
-
         try {
             await message.member.timeout(
                 60000,
@@ -2333,6 +2426,267 @@ client.on("messageCreate", async message => {
             );
         } catch {}
     }
+});
+
+// ============================================================
+// SERVER EVENT LOGGING
+// ============================================================
+
+client.on("messageUpdate", async (oldMessage, newMessage) => {
+    if (!newMessage.guild || newMessage.author?.bot) return;
+
+    try {
+        if (oldMessage.partial) await oldMessage.fetch();
+        if (newMessage.partial) await newMessage.fetch();
+    } catch {}
+
+    const oldContent = oldMessage.content || "(content unavailable)";
+    const newContent = newMessage.content || "(content unavailable)";
+
+    if (oldContent === newContent) return;
+
+    await logEvent(
+        newMessage.guild,
+        "✏️ Message Edited",
+        `**User:** ${newMessage.author?.tag || newMessage.author?.username || "Unknown"} (${newMessage.author?.id || "unknown"})\n**Channel:** ${newMessage.channel}\n**Before:** ${truncateLog(oldContent)}\n**After:** ${truncateLog(newContent)}`
+    );
+});
+
+client.on("messageDelete", async message => {
+    if (!message.guild || message.author?.bot) return;
+
+    await logEvent(
+        message.guild,
+        "🗑️ Message Deleted",
+        `**User:** ${message.author?.tag || "Unknown"} (${message.author?.id || "unknown"})\n**Channel:** ${message.channel}\n**Content:** ${truncateLog(message.content || "Content unavailable")}`
+    );
+});
+
+client.on("roleCreate", async role => {
+    const executor = await findAuditExecutor(role.guild, AuditLogEvent.RoleCreate, role.id);
+    await logEvent(
+        role.guild,
+        "🆕 Role Created",
+        `**Role:** ${role} (${role.id})\n**Name:** ${role.name}\n**Created by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("roleDelete", async role => {
+    const executor = await findAuditExecutor(role.guild, AuditLogEvent.RoleDelete, role.id);
+    await logEvent(
+        role.guild,
+        "🗑️ Role Deleted",
+        `**Role:** ${role.name} (${role.id})\n**Deleted by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("roleUpdate", async (oldRole, newRole) => {
+    const changes = [];
+
+    if (oldRole.name !== newRole.name) {
+        changes.push(`**Name:** ${oldRole.name} → ${newRole.name}`);
+    }
+    if (oldRole.color !== newRole.color) {
+        changes.push(`**Color:** ${oldRole.hexColor} → ${newRole.hexColor}`);
+    }
+    if (oldRole.hoist !== newRole.hoist) {
+        changes.push(`**Hoisted:** ${oldRole.hoist} → ${newRole.hoist}`);
+    }
+    if (oldRole.mentionable !== newRole.mentionable) {
+        changes.push(`**Mentionable:** ${oldRole.mentionable} → ${newRole.mentionable}`);
+    }
+
+    if (!changes.length) return;
+
+    const executor = await findAuditExecutor(newRole.guild, AuditLogEvent.RoleUpdate, newRole.id);
+    await logEvent(
+        newRole.guild,
+        "✏️ Role Updated",
+        `**Role:** ${newRole} (${newRole.id})\n${changes.join("\n")}\n**Changed by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+    const oldRoles = new Set(oldMember.roles.cache.keys());
+    const newRoles = new Set(newMember.roles.cache.keys());
+
+    const added = [...newRoles].filter(id => !oldRoles.has(id));
+    const removed = [...oldRoles].filter(id => !newRoles.has(id));
+
+    if (added.length || removed.length) {
+        const executor = await findAuditExecutor(
+            newMember.guild,
+            AuditLogEvent.MemberRoleUpdate,
+            newMember.id
+        );
+
+        const addedText = added.length
+            ? `**Given:** ${added.map(id => newMember.guild.roles.cache.get(id)?.toString() || id).join(", ")}`
+            : "**Given:** None";
+
+        const removedText = removed.length
+            ? `**Removed:** ${removed.map(id => oldMember.guild.roles.cache.get(id)?.name || id).join(", ")}`
+            : "**Removed:** None";
+
+        await logEvent(
+            newMember.guild,
+            "🎭 Member Roles Updated",
+            `**Member:** ${newMember.user.tag} (${newMember.id})\n${addedText}\n${removedText}\n**Changed by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+        );
+    }
+
+    if (oldMember.nickname !== newMember.nickname) {
+        const executor = await findAuditExecutor(
+            newMember.guild,
+            AuditLogEvent.MemberUpdate,
+            newMember.id
+        );
+
+        await logEvent(
+            newMember.guild,
+            "🏷️ Nickname Changed",
+            `**Member:** ${newMember.user.tag} (${newMember.id})\n**Before:** ${oldMember.nickname || "None"}\n**After:** ${newMember.nickname || "None"}\n**Changed by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+        );
+    }
+});
+
+client.on("guildMemberRemove", async member => {
+    const executor = await findAuditExecutor(
+        member.guild,
+        AuditLogEvent.MemberKick,
+        member.id
+    );
+
+    if (executor) {
+        await logEvent(
+            member.guild,
+            "👢 Member Kicked",
+            `**Member:** ${member.user.tag} (${member.id})\n**Kicked by:** ${executor.tag} (${executor.id})`
+        );
+    } else {
+        await logEvent(
+            member.guild,
+            "🚪 Member Left",
+            `**Member:** ${member.user.tag} (${member.id})`
+        );
+    }
+});
+
+client.on("guildBanAdd", async ban => {
+    const executor = await findAuditExecutor(ban.guild, AuditLogEvent.MemberBanAdd, ban.user.id);
+    await logEvent(
+        ban.guild,
+        "🔨 Member Banned",
+        `**Member:** ${ban.user.tag} (${ban.user.id})\n**Banned by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("guildBanRemove", async ban => {
+    const executor = await findAuditExecutor(ban.guild, AuditLogEvent.MemberBanRemove, ban.user.id);
+    await logEvent(
+        ban.guild,
+        "🔓 Member Unbanned",
+        `**Member:** ${ban.user.tag} (${ban.user.id})\n**Unbanned by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("channelCreate", async channel => {
+    if (!channel.guild || channel.name === LOG_CHANNEL_NAME) return;
+    const executor = await findAuditExecutor(channel.guild, AuditLogEvent.ChannelCreate, channel.id);
+    await logEvent(
+        channel.guild,
+        "🆕 Channel Created",
+        `**Channel:** ${channel} (${channel.id})\n**Type:** ${channel.type}\n**Created by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("channelDelete", async channel => {
+    if (!channel.guild || channel.name === LOG_CHANNEL_NAME) return;
+    const executor = await findAuditExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
+    await logEvent(
+        channel.guild,
+        "🗑️ Channel Deleted",
+        `**Channel:** #${channel.name} (${channel.id})\n**Deleted by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("channelUpdate", async (oldChannel, newChannel) => {
+    if (!newChannel.guild || newChannel.name === LOG_CHANNEL_NAME) return;
+
+    const changes = [];
+    if (oldChannel.name !== newChannel.name) {
+        changes.push(`**Name:** ${oldChannel.name} → ${newChannel.name}`);
+    }
+    if (oldChannel.topic !== newChannel.topic && "topic" in oldChannel && "topic" in newChannel) {
+        changes.push(`**Topic:** ${truncateLog(oldChannel.topic || "None", 300)} → ${truncateLog(newChannel.topic || "None", 300)}`);
+    }
+    if (oldChannel.parentId !== newChannel.parentId) {
+        changes.push(`**Category changed.**`);
+    }
+
+    if (!changes.length) return;
+
+    const executor = await findAuditExecutor(newChannel.guild, AuditLogEvent.ChannelUpdate, newChannel.id);
+    await logEvent(
+        newChannel.guild,
+        "✏️ Channel Updated",
+        `**Channel:** ${newChannel} (${newChannel.id})\n${changes.join("\n")}\n**Changed by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("guildUpdate", async (oldGuild, newGuild) => {
+    const changes = [];
+    if (oldGuild.name !== newGuild.name) changes.push(`**Name:** ${oldGuild.name} → ${newGuild.name}`);
+    if (oldGuild.description !== newGuild.description) changes.push(`**Description changed.**`);
+    if (!changes.length) return;
+
+    const executor = await findAuditExecutor(newGuild, AuditLogEvent.GuildUpdate, newGuild.id);
+    await logEvent(
+        newGuild,
+        "⚙️ Server Updated",
+        `${changes.join("\n")}\n**Changed by:** ${executor ? `${executor.tag} (${executor.id})` : "Unknown"}`
+    );
+});
+
+client.on("inviteCreate", async invite => {
+    if (!invite.guild) return;
+    await logEvent(
+        invite.guild,
+        "🔗 Invite Created",
+        `**Code:** ${invite.code}\n**Channel:** ${invite.channel || "Unknown"}\n**Created by:** ${invite.inviter ? `${invite.inviter.tag} (${invite.inviter.id})` : "Unknown"}`
+    );
+});
+
+client.on("inviteDelete", async invite => {
+    if (!invite.guild) return;
+    await logEvent(
+        invite.guild,
+        "🗑️ Invite Deleted",
+        `**Code:** ${invite.code}\n**Channel:** ${invite.channel || "Unknown"}`
+    );
+});
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+    if (!newState.guild) return;
+    if (oldState.channelId === newState.channelId && oldState.serverMute === newState.serverMute && oldState.serverDeaf === newState.serverDeaf) return;
+
+    let action = "🎙️ Voice State Updated";
+    let details = `**Member:** ${newState.member?.user.tag || newState.id} (${newState.id})`;
+
+    if (!oldState.channelId && newState.channelId) {
+        action = "🎙️ Joined Voice Channel";
+        details += `\n**Channel:** <#${newState.channelId}>`;
+    } else if (oldState.channelId && !newState.channelId) {
+        action = "🚪 Left Voice Channel";
+        details += `\n**Channel:** <#${oldState.channelId}>`;
+    } else if (oldState.channelId !== newState.channelId) {
+        action = "🔄 Moved Voice Channel";
+        details += `\n**From:** <#${oldState.channelId}>\n**To:** <#${newState.channelId}>`;
+    } else {
+        details += `\n**Server mute:** ${oldState.serverMute} → ${newState.serverMute}\n**Server deaf:** ${oldState.serverDeaf} → ${newState.serverDeaf}`;
+    }
+
+    await logEvent(newState.guild, action, details);
 });
 
 // ============================================================
@@ -2372,6 +2726,7 @@ client.once("clientReady", async () => {
                     ensureGuildData(guild.id);
 
                     await setupRoles(guild);
+                    await setupLogging(guild);
                     await cacheInvites(guild);
 
                     console.log(
@@ -2417,6 +2772,7 @@ client.on("guildCreate", async guild => {
 
     try {
         await setupRoles(guild);
+        await setupLogging(guild);
     } catch (error) {
         console.error(
             `Role setup error in ${guild.name}:`,
