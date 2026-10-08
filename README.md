@@ -1,7 +1,5 @@
 # 🛡️ USM Defenses
 
-**Some are placeholders for now**
-
 **USM Defenses** is a Discord moderation and management bot designed for military simulation, Roblox groups, communities, and general Discord servers.
 
 It provides moderation, security, Roblox verification, invite tracking, duty tracking, commendations, and other tools designed to help server staff manage their communities.
@@ -56,11 +54,11 @@ It provides moderation, security, Roblox verification, invite tracking, duty tra
 
 # 🤖 Using USM Defenses
 
-If you want to use the **official USM Defenses bot**, join the USM Defenses Discord server.
+If you want to use the **official USM Defenses bot**, join the official USM Defenses Discord server.
 
 The server will contain information about the bot, setup instructions, support, updates, and how to get started.
 
-> The official server link will be provided here once available.
+> **Official Discord server:** Coming soon.
 
 ---
 
@@ -165,8 +163,16 @@ Never commit your `.env` file to GitHub.
 Your `.gitignore` should include:
 
 ```gitignore
-.env
 node_modules/
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
 ```
 
 ---
@@ -274,11 +280,11 @@ USM Defenses has its own Privacy Policy and Terms of Service.
 
 ### Privacy Policy
 
-**[View the USM Defenses Privacy Policy](YOUR_PRIVACY_POLICY_URL_HERE)**
+[View the USM Defenses Privacy Policy](https://vekz99z.github.io/usm-defenses-privacy/?utm_source=chatgpt.com)
 
 ### Terms of Service
 
-**[View the USM Defenses Terms of Service](YOUR_TOS_URL_HERE)**
+[View the USM Defenses Terms of Service](https://vekz99z.github.io/usm-defenses-privacy/terms.html?utm_source=chatgpt.com)
 
 By using the hosted USM Defenses bot, users are subject to the applicable Terms of Service and Privacy Policy.
 
@@ -312,11 +318,9 @@ Discord and Roblox are trademarks of their respective owners.
 
 # 📄 License
 
-This project is provided under the license included in this repository.
+USM Defenses is provided under the **USM Defenses License** included in this repository.
 
-If this repository does not contain a license, all rights are reserved by the project owner.
-
-Do not redistribute, sell, or claim the project as your own without permission from the project owner.
+Please read `LICENSE.md` before using, modifying, or redistributing the project.
 
 ---
 
