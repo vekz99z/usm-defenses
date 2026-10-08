@@ -1,5 +1,5 @@
 # 🛡️ USM Defenses
-
+**Some are placeholders for now**
 **USM Defenses** is a Discord moderation and management bot designed for military simulation, Roblox groups, communities, and general Discord servers.
 
 It provides moderation, security, Roblox verification, invite tracking, duty tracking, commendations, and other tools designed to help server staff manage their communities.
