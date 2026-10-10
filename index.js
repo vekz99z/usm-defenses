@@ -738,8 +738,28 @@ const commands = [
 
     // 25
     new SlashCommandBuilder()
-        .setName("ticket")
-        .setDescription("Create a private support ticket."),
+        .setName("ticket-set-up")
+        .setDescription("Set up the ticket panel (server administrators only).")
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addChannelOption(option => option
+            .setName("panel_channel")
+            .setDescription("Channel where the ticket panel will be posted")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true))
+        .addChannelOption(option => option
+            .setName("ticket_category")
+            .setDescription("Category where new ticket channels will be created")
+            .addChannelTypes(ChannelType.GuildCategory)
+            .setRequired(true))
+        .addBooleanOption(option => option.setName("report_player").setDescription("Enable Report a player").setRequired(true))
+        .addBooleanOption(option => option.setName("report_bug").setDescription("Enable Report a bug").setRequired(true))
+        .addBooleanOption(option => option.setName("normal_ticket").setDescription("Enable Normal Ticket").setRequired(true))
+        .addBooleanOption(option => option.setName("request_case").setDescription("Enable Request Case").setRequired(true))
+        .addRoleOption(option => option.setName("ping_role_1").setDescription("First role to ping for new tickets").setRequired(false))
+        .addRoleOption(option => option.setName("ping_role_2").setDescription("Second role to ping for new tickets").setRequired(false))
+        .addRoleOption(option => option.setName("ping_role_3").setDescription("Third role to ping for new tickets").setRequired(false))
+        .addRoleOption(option => option.setName("ping_role_4").setDescription("Fourth role to ping for new tickets").setRequired(false))
+        .addRoleOption(option => option.setName("ping_role_5").setDescription("Fifth role to ping for new tickets").setRequired(false)),
 
     // 26
     new SlashCommandBuilder()
@@ -872,6 +892,67 @@ client.on("interactionCreate", async interaction => {
         // ====================================================
         // SECURITY BUTTONS
         // ====================================================
+
+        // Ticket buttons are handled before the staff-only security buttons.
+        if (interaction.isButton() && interaction.customId.startsWith("ticket_close:")) {
+            const [, ownerId] = interaction.customId.split(":");
+            const topic = interaction.channel?.topic || "";
+            const ticketOwner = topic.match(/USM-TICKET\|(\d+)\|/);
+            const ownerFromTopic = ticketOwner?.[1];
+            const settings = getSettings(interaction.guild.id);
+            const hasTicketRole = (settings.ticketSetup?.roleIds || []).some(id => interaction.member?.roles?.cache?.has(id));
+            const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+            if (interaction.user.id !== ownerFromTopic && !hasTicketRole && !isAdmin) {
+                await interaction.reply({ content: "❌ Only the ticket creator, configured ticket staff, or a server administrator can close this ticket.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            await interaction.reply({ content: `🔒 Ticket closed by ${interaction.user}. This channel will be deleted in 5 seconds.` });
+            setTimeout(() => interaction.channel?.delete(`Ticket closed by ${interaction.user.tag}`).catch(() => {}), 5000);
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === "ticket_type_select") {
+            const settings = getSettings(interaction.guild.id);
+            const setup = settings.ticketSetup;
+            if (!setup || !Array.isArray(setup.enabledTypes) || !setup.enabledTypes.includes(interaction.values[0])) {
+                await interaction.reply({ content: "❌ This ticket option is not configured. Ask a server administrator to run `/ticket-set-up`.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            const existing = interaction.guild.channels.cache.find(ch => ch.type === ChannelType.GuildText && (ch.topic || "").startsWith(`USM-TICKET|${interaction.user.id}|`));
+            if (existing) {
+                await interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            const type = interaction.values[0];
+            const typeLabels = { report_player: "Report a player", report_bug: "Report a bug", normal_ticket: "Normal Ticket", request_case: "Request Case" };
+            const safeUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 45) || "user";
+            const overwrites = [
+                { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
+                { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] }
+            ];
+            for (const roleId of setup.roleIds || []) overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+            const ticketChannel = await interaction.guild.channels.create({
+                name: `${type === "report_player" ? "player-report" : type === "report_bug" ? "bug-report" : type === "request_case" ? "case-request" : "ticket"}-${safeUsername}`.slice(0, 95),
+                type: ChannelType.GuildText,
+                parent: setup.categoryId,
+                topic: `USM-TICKET|${interaction.user.id}|${type}`,
+                permissionOverwrites: overwrites,
+                reason: `Ticket opened by ${interaction.user.tag}: ${typeLabels[type]}`
+            });
+            const roleMentions = (setup.roleIds || []).map(id => `<@&${id}>`).join(" ");
+            const closeRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`ticket_close:${interaction.user.id}`).setLabel("Close Ticket").setStyle(ButtonStyle.Danger).setEmoji("🔒")
+            );
+            await ticketChannel.send({
+                content: `${roleMentions}\n🎫 **${typeLabels[type]}**\nCreated by ${interaction.user}. Please describe your request below.\n\nWhen staff have finished helping, use the **Close Ticket** button.`,
+                allowedMentions: { roles: setup.roleIds || [], users: [interaction.user.id] },
+                components: [closeRow]
+            });
+            await interaction.reply({ content: `✅ Your ticket has been created: ${ticketChannel}`, flags: MessageFlags.Ephemeral });
+            addAudit(interaction.guild.id, "Ticket created", interaction.user.id, null, typeLabels[type]);
+            return;
+        }
 
         if (interaction.isButton()) {
 
@@ -1371,8 +1452,7 @@ client.on("interactionCreate", async interaction => {
         // ---------------- INVITE ----------------
 
         if (command === "invite") {
-
-            await interaction.reply({
+ await interaction.reply({
                 content:
                     `🔗 **USM Defenses Invite**\n\n` +
                     `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&permissions=8&integration_type=0&scope=bot+applications.commands`
@@ -1458,8 +1538,7 @@ client.on("interactionCreate", async interaction => {
                 content:
                     `📨 **Invite Stats — ${user.tag}**\n\n` +
                     `Joins: **${stats.joins}**\n` +
-                    `Unique members: **${stats.members.length}**
-\n` +
+                    `Unique members: **${stats.members.length}**\n` +
                     `Invite links created: **${stats.linksCreated}**`,
                 flags: MessageFlags.Ephemeral
             });
@@ -2191,73 +2270,46 @@ client.on("interactionCreate", async interaction => {
             return;
         }
 
-        // ---------------- TICKET ----------------
+        // ---------------- TICKET SETUP ----------------
 
-        if (command === "ticket") {
-
-            const existing =
-                interaction.guild.channels.cache.find(
-                    channel =>
-                        channel.type === ChannelType.GuildText &&
-                        channel.topic === `USM ticket for ${interaction.user.id}`
-                );
-
-            if (existing) {
-                await interaction.reply({
-                    content: `❌ You already have a ticket: ${existing}`,
-                    flags: MessageFlags.Ephemeral
-                });
+        if (command === "ticket-set-up") {
+            if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                await interaction.reply({ content: "❌ Only server administrators can use `/ticket-set-up`. Bot staff roles do not grant access.", flags: MessageFlags.Ephemeral });
                 return;
             }
-
-            const settings =
-                getSettings(interaction.guild.id);
-
-            const overwrites = [
-                {
-                    id: interaction.guild.roles.everyone.id,
-                    deny: ["ViewChannel"]
-                },
-                {
-                    id: interaction.user.id,
-                    allow: [
-                        "ViewChannel",
-                        "SendMessages",
-                        "ReadMessageHistory"
-                    ]
-                }
-            ];
-
-            if (settings.staffRoleId) {
-                overwrites.push({
-                    id: settings.staffRoleId,
-                    allow: [
-                        "ViewChannel",
-                        "SendMessages",
-                        "ReadMessageHistory"
-                    ]
-                });
+            const panelChannel = interaction.options.getChannel("panel_channel", true);
+            const category = interaction.options.getChannel("ticket_category", true);
+            const enabledTypes = [
+                ["report_player", interaction.options.getBoolean("report_player", true)],
+                ["report_bug", interaction.options.getBoolean("report_bug", true)],
+                ["normal_ticket", interaction.options.getBoolean("normal_ticket", true)],
+                ["request_case", interaction.options.getBoolean("request_case", true)]
+            ].filter(([, enabled]) => enabled).map(([type]) => type);
+            if (!enabledTypes.length) {
+                await interaction.reply({ content: "❌ Enable at least one ticket type and run the command again.", flags: MessageFlags.Ephemeral });
+                return;
             }
-
-            const channel =
-                await interaction.guild.channels.create({
-                    name: `ticket-${interaction.user.username}`.toLowerCase().slice(0, 90),
-                    type: ChannelType.GuildText,
-                    topic: `USM ticket for ${interaction.user.id}`,
-                    permissionOverwrites: overwrites
-                });
-
-            await channel.send(
-                `🎫 **USM Defenses Ticket**\n\n` +
-                `Created by ${interaction.user}.\n` +
-                `Staff will assist you shortly.`
-            );
-
-            await interaction.reply({
-                content: `🎫 Ticket created: ${channel}`,
-                flags: MessageFlags.Ephemeral
-            });
-
+            const roleIds = ["ping_role_1", "ping_role_2", "ping_role_3", "ping_role_4", "ping_role_5"]
+                .map(name => interaction.options.getRole(name)?.id)
+                .filter((id, index, arr) => id && arr.indexOf(id) === index);
+            const settings = getSettings(interaction.guild.id);
+            settings.ticketSetup = { panelChannelId: panelChannel.id, categoryId: category.id, enabledTypes, roleIds };
+            const labels = { report_player: "Report a player", report_bug: "Report a bug", normal_ticket: "Normal Ticket", request_case: "Request Case" };
+            const menu = new StringSelectMenuBuilder()
+                .setCustomId("ticket_type_select")
+                .setPlaceholder("Choose your ticket type")
+                .setMinValues(1)
+                .setMaxValues(1)
+                .addOptions(enabledTypes.map(type => ({ label: labels[type], value: type, description: `Open a ${labels[type].toLowerCase()}` })));
+            const embed = new EmbedBuilder()
+                .setColor(0x263445)
+                .setTitle("🎫 USM Defenses — Support Center")
+                .setDescription("Use the dropdown below to choose your type of report.")
+                .setFooter({ text: "USM Defenses • Ticket Support" });
+            const panelMessage = await panelChannel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+            saveDatabase();
+            addAudit(interaction.guild.id, "Ticket panel configured", interaction.user.id, null, `Panel: #${panelChannel.name}; category: ${category.name}; types: ${enabledTypes.join(", ")}`);
+            await interaction.reply({ content: `✅ Ticket panel posted in ${panelChannel}. New tickets will be created under **${category.name}**. Enabled: ${enabledTypes.map(type => labels[type]).join(", ")}.`, flags: MessageFlags.Ephemeral });
             return;
         }
 
